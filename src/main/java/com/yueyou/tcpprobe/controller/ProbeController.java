@@ -1,6 +1,8 @@
 package com.yueyou.tcpprobe.controller;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.yueyou.tcpprobe.probe.ProbeResult;
+import com.yueyou.tcpprobe.probe.TcpProbe;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
@@ -19,13 +21,19 @@ public class ProbeController {
 
     private static final int MAX_TARGETS = 20;
 
+    private final TcpProbe tcpProbe;
+
+    public ProbeController(TcpProbe tcpProbe) {
+        this.tcpProbe = tcpProbe;
+    }
+
     @GetMapping("/healthz")
     public Map<String, String> health() {
         return Collections.singletonMap("status", "up");
     }
 
     @PostMapping(path = "/probe", consumes = "application/json")
-    public ResponseEntity<Map<String, Object>> probe(@RequestBody JsonNode request) {
+    public ResponseEntity<?> probe(@RequestBody JsonNode request) {
         JsonNode targets = request.path("targets");
         if (!targets.isArray() || targets.size() < 1 || targets.size() > MAX_TARGETS) {
             return error(HttpStatus.BAD_REQUEST, "invalid_request", "targets",
@@ -54,8 +62,14 @@ public class ProbeController {
             }
         }
 
-        return error(HttpStatus.NOT_IMPLEMENTED, "probe_not_implemented", null,
-                "TCP probing is not implemented yet.");
+        if (targets.size() > 1) {
+            return error(HttpStatus.NOT_IMPLEMENTED, "probe_not_implemented", null,
+                    "Batch probing is not implemented yet.");
+        }
+
+        JsonNode target = targets.get(0);
+        ProbeResult result = tcpProbe.probe(target.get("host").textValue(), target.get("port").intValue());
+        return ResponseEntity.ok(Collections.singletonMap("results", Collections.singletonList(result)));
     }
 
     @ExceptionHandler(HttpMessageNotReadableException.class)

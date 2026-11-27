@@ -1,15 +1,23 @@
 package com.yueyou.tcpprobe.controller;
 
+import com.yueyou.tcpprobe.probe.TcpProbe;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
+import org.springframework.context.annotation.Import;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.ResultActions;
 
+import java.net.InetSocketAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.util.Arrays;
 import java.util.Collections;
 
+import static org.hamcrest.Matchers.isIn;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.springframework.http.MediaType.APPLICATION_JSON;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -17,6 +25,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @WebMvcTest(ProbeController.class)
+@Import(TcpProbe.class)
 class ProbeControllerTest {
 
     @Autowired
@@ -30,7 +39,7 @@ class ProbeControllerTest {
     }
 
     @Test
-    void acceptsValidBatchWithoutInventingProbeResults() throws Exception {
+    void reportsBatchExecutionIsPending() throws Exception {
         submit("{\"targets\":[{\"host\":\"127.0.0.1\",\"port\":1},"
                 + "{\"host\":\"::1\",\"port\":65535}]}")
                 .andExpect(status().isNotImplemented())
@@ -80,6 +89,39 @@ class ProbeControllerTest {
         submit("{\"targets\":[{\"host\":" + host + ",\"port\":80}]}")
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.error.field").value("targets[0].host"));
+    }
+
+    @Test
+    void reportsReachableTargetAndClosesSocket() throws Exception {
+        try (ServerSocket listener = new ServerSocket()) {
+            listener.bind(new InetSocketAddress("127.0.0.1", 0));
+            int port = listener.getLocalPort();
+            submitLocalTarget(port)
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.results[0].host").value("127.0.0.1"))
+                    .andExpect(jsonPath("$.results[0].port").value(port))
+                    .andExpect(jsonPath("$.results[0].status").value("reachable"))
+                    .andExpect(jsonPath("$.results[0].duration_ms").isNumber());
+            listener.setSoTimeout(1000);
+            try (Socket connection = listener.accept()) {
+                connection.setSoTimeout(1000);
+                assertEquals(-1, connection.getInputStream().read());
+            }
+        }
+    }
+
+    @Test
+    void reportsUnavailableTargetInResult() throws Exception {
+        try (Socket boundWithoutListener = new Socket()) {
+            boundWithoutListener.bind(new InetSocketAddress("127.0.0.1", 0));
+            submitLocalTarget(boundWithoutListener.getLocalPort())
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.results[0].status").value(isIn(Arrays.asList("connection_refused", "timeout"))));
+        }
+    }
+
+    private ResultActions submitLocalTarget(int port) throws Exception {
+        return submit("{\"targets\":[{\"host\":\"127.0.0.1\",\"port\":" + port + "}]}");
     }
 
     private ResultActions submit(String body) throws Exception {
