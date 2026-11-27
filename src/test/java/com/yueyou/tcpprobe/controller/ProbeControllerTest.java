@@ -2,11 +2,14 @@ package com.yueyou.tcpprobe.controller;
 
 import com.yueyou.tcpprobe.probe.BatchProbeService;
 import com.yueyou.tcpprobe.probe.TcpProbe;
+import com.yueyou.tcpprobe.ratelimit.ProbeRateLimiter;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
+import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.context.annotation.Import;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.ResultActions;
@@ -22,11 +25,13 @@ import static org.hamcrest.Matchers.isIn;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.setup.MockMvcBuilders.standaloneSetup;
 import static org.springframework.http.MediaType.APPLICATION_JSON;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -37,11 +42,30 @@ class ProbeControllerTest {
     @Autowired
     private MockMvc mvc;
 
+    @MockBean
+    private ProbeRateLimiter limiter;
+
+    @BeforeEach
+    void allowProbeRequests() {
+        when(limiter.tryAcquire()).thenReturn(true);
+    }
+
     @Test
     void reportsHealth() throws Exception {
         mvc.perform(get("/healthz"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("up"));
+        verifyNoInteractions(limiter);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"/probe", "/probe/"})
+    void rateLimitsBeforeParsingTheRequestBody(String path) throws Exception {
+        when(limiter.tryAcquire()).thenReturn(false);
+        mvc.perform(post(path).contentType(APPLICATION_JSON).content("{"))
+                .andExpect(status().isTooManyRequests())
+                .andExpect(header().string("Retry-After", "1"))
+                .andExpect(jsonPath("$.error.code").value("rate_limit_exceeded"));
     }
 
     @Test
