@@ -1,8 +1,7 @@
 package com.yueyou.tcpprobe.controller;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import com.yueyou.tcpprobe.probe.ProbeResult;
-import com.yueyou.tcpprobe.probe.TcpProbe;
+import com.yueyou.tcpprobe.probe.BatchProbeService;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
@@ -12,19 +11,23 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.net.InetSocketAddress;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.RejectedExecutionException;
 
 @RestController
 public class ProbeController {
 
     private static final int MAX_TARGETS = 20;
 
-    private final TcpProbe tcpProbe;
+    private final BatchProbeService batchProbe;
 
-    public ProbeController(TcpProbe tcpProbe) {
-        this.tcpProbe = tcpProbe;
+    public ProbeController(BatchProbeService batchProbe) {
+        this.batchProbe = batchProbe;
     }
 
     @GetMapping("/healthz")
@@ -40,6 +43,7 @@ public class ProbeController {
                     "Provide between 1 and " + MAX_TARGETS + " targets.");
         }
 
+        List<InetSocketAddress> addresses = new ArrayList<>(targets.size());
         for (int index = 0; index < targets.size(); index++) {
             JsonNode target = targets.get(index);
             String field = "targets[" + index + "]";
@@ -60,16 +64,16 @@ public class ProbeController {
                 return error(HttpStatus.BAD_REQUEST, "invalid_request", field + ".port",
                         "Port must be an integer between 1 and 65535.");
             }
+            addresses.add(InetSocketAddress.createUnresolved(host.textValue(), port.intValue()));
         }
 
-        if (targets.size() > 1) {
-            return error(HttpStatus.NOT_IMPLEMENTED, "probe_not_implemented", null,
-                    "Batch probing is not implemented yet.");
-        }
+        return ResponseEntity.ok(Collections.singletonMap("results", batchProbe.probe(addresses)));
+    }
 
-        JsonNode target = targets.get(0);
-        ProbeResult result = tcpProbe.probe(target.get("host").textValue(), target.get("port").intValue());
-        return ResponseEntity.ok(Collections.singletonMap("results", Collections.singletonList(result)));
+    @ExceptionHandler(RejectedExecutionException.class)
+    public ResponseEntity<Map<String, Object>> unavailable() {
+        return error(HttpStatus.SERVICE_UNAVAILABLE, "probe_capacity_unavailable", null,
+                "Probe capacity is temporarily unavailable.");
     }
 
     @ExceptionHandler(HttpMessageNotReadableException.class)

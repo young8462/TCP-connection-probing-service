@@ -1,5 +1,6 @@
 package com.yueyou.tcpprobe.controller;
 
+import com.yueyou.tcpprobe.probe.BatchProbeService;
 import com.yueyou.tcpprobe.probe.TcpProbe;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -15,9 +16,14 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.concurrent.RejectedExecutionException;
 
 import static org.hamcrest.Matchers.isIn;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.setup.MockMvcBuilders.standaloneSetup;
 import static org.springframework.http.MediaType.APPLICATION_JSON;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -25,7 +31,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @WebMvcTest(ProbeController.class)
-@Import(TcpProbe.class)
+@Import({TcpProbe.class, BatchProbeService.class})
 class ProbeControllerTest {
 
     @Autowired
@@ -39,11 +45,22 @@ class ProbeControllerTest {
     }
 
     @Test
-    void reportsBatchExecutionIsPending() throws Exception {
-        submit("{\"targets\":[{\"host\":\"127.0.0.1\",\"port\":1},"
-                + "{\"host\":\"::1\",\"port\":65535}]}")
-                .andExpect(status().isNotImplemented())
-                .andExpect(jsonPath("$.error.code").value("probe_not_implemented"));
+    void reportsMixedBatchInInputOrderAndPreservesDuplicates() throws Exception {
+        try (ServerSocket listener = new ServerSocket(); Socket unavailable = new Socket()) {
+            listener.bind(new InetSocketAddress("127.0.0.1", 0));
+            unavailable.bind(new InetSocketAddress("127.0.0.1", 0));
+            String reachable = localTarget(listener.getLocalPort());
+            submit("{\"targets\":[" + reachable + "," + localTarget(unavailable.getLocalPort())
+                    + "," + reachable + "]}")
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.results.length()").value(3))
+                    .andExpect(jsonPath("$.results[0].port").value(listener.getLocalPort()))
+                    .andExpect(jsonPath("$.results[0].status").value("reachable"))
+                    .andExpect(jsonPath("$.results[1].port").value(unavailable.getLocalPort()))
+                    .andExpect(jsonPath("$.results[1].status").value(isIn(Arrays.asList("connection_refused", "timeout"))))
+                    .andExpect(jsonPath("$.results[2].port").value(listener.getLocalPort()))
+                    .andExpect(jsonPath("$.results[2].status").value("reachable"));
+        }
     }
 
     @ParameterizedTest
@@ -120,8 +137,23 @@ class ProbeControllerTest {
         }
     }
 
+    @Test
+    void reportsCapacityExhaustionAsServiceUnavailable() throws Exception {
+        BatchProbeService overloaded = mock(BatchProbeService.class);
+        when(overloaded.probe(anyList())).thenThrow(new RejectedExecutionException());
+        standaloneSetup(new ProbeController(overloaded)).build()
+                .perform(post("/probe").contentType(APPLICATION_JSON)
+                        .content("{\"targets\":[" + localTarget(80) + "]}"))
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(jsonPath("$.error.code").value("probe_capacity_unavailable"));
+    }
+
     private ResultActions submitLocalTarget(int port) throws Exception {
         return submit("{\"targets\":[{\"host\":\"127.0.0.1\",\"port\":" + port + "}]}");
+    }
+
+    private String localTarget(int port) {
+        return "{\"host\":\"127.0.0.1\",\"port\":" + port + "}";
     }
 
     private ResultActions submit(String body) throws Exception {
